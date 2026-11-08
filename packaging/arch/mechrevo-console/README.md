@@ -11,6 +11,11 @@
   `/dev/tuxedo_io` 切换 EC 模式字节，按 Windows 54919 profile 写 PL1/PL2/PL4，
   并同步 UEFI `UniWillVariable.PowerMode`。
 
+只能启用一个，否则同一次按键会切两档。另安装
+`/usr/lib/systemd/system-sleep/mechrevo-touchpad`：只恢复由
+`mechrevo-control touchpad off|on` 保存的 i2c 硬件状态；KDE/libinput 自己的
+`Enabled=false` 不会生成该状态文件。
+
 只能启用一个，否则同一次按键会切两档：
 
 ```sh
@@ -26,8 +31,8 @@ systemctl enable --now mechrevo-ec-hotkey.service
 本机 Turbo 小灯变化已有用户确认，其余灯态及唤醒后的行为见
 [灯光验证记录](../../../docs/PERFORMANCE-INDICATOR.md)。
 
-当前配方固定源码提交 `a88617b4fa26b9307b919df183f326a8d1898515`，包版本为
-`0.1.0.r1535.ga88617b-1`。该提交在 r1535 基线上增加无 tccd 的 EC-only 热键服务、Windows 54919 TDP profile 与 UEFI PowerMode 同步；
+当前配方固定源码提交 `4b9ef19522b3efb455a793f0fa35d4208150cd3e`，包版本为
+`0.1.0.r1535.g4b9ef19-1`。该提交在 r1535 基线上增加无 tccd 的 EC-only 热键服务、Windows 54919 TDP profile、UEFI PowerMode 同步与触控板恢复 hook；
 发布收据仍对应旧的 r1535-2 包，不表示新包已经发布或完成整包验收。
 该配方已发布到独立的 [AUR 包](https://aur.archlinux.org/packages/mechrevo-console)，
 签名安装包与配方源包见 [GitHub Release](https://github.com/LIghtJUNction/mechrevo-drivers/releases/tag/console-v0.1.0-r1535-2)。
@@ -86,8 +91,8 @@ Rust 使用 `-C target-cpu=x86-64`；三个 ELF 产物均需检查 GNU ISA 属�
 检查包内容和部署材料后，通过 pacman 安装本地产物：
 
 ```sh
-pacman -Qlp mechrevo-console-0.1.0.r1535.ga88617b-1-x86_64.pkg.tar.zst
-sudo pacman -U ./mechrevo-console-0.1.0.r1535.ga88617b-1-x86_64.pkg.tar.zst
+pacman -Qlp mechrevo-console-0.1.0.r1535.g4b9ef19-1-x86_64.pkg.tar.zst
+sudo pacman -U ./mechrevo-console-0.1.0.r1535.g4b9ef19-1-x86_64.pkg.tar.zst
 mechrevo-console --version
 mechrevo-console status --json
 ```
