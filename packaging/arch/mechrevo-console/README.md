@@ -7,8 +7,8 @@
 
 - 用户级 `mechrevo-gaming-hotkey.service`：需要可用的 tccd/D-Bus，在实体按键、GUI 或
   电源状态切换后同步 TCC profile 与机身性能档位灯。
-- 系统级 `mechrevo-ec-hotkey.service`：root、无 tccd 依赖，只监听 F6 并通过
-  `/dev/tuxedo_io` 切换 EC 模式字节。
+- 系统级 `mechrevo-ec-hotkey.service`：root、无 tccd 依赖，只监听 F6，通过
+  `/dev/tuxedo_io` 切换 EC 模式字节，并同步 UEFI `UniWillVariable.PowerMode`。
 
 只能启用一个，否则同一次按键会切两档：
 
@@ -25,8 +25,8 @@ systemctl enable --now mechrevo-ec-hotkey.service
 本机 Turbo 小灯变化已有用户确认，其余灯态及唤醒后的行为见
 [灯光验证记录](../../../docs/PERFORMANCE-INDICATOR.md)。
 
-当前配方固定源码提交 `7dc7d9a748308cdd0875211e6fce21800b42b65c`，包版本为
-`0.1.0.r1535.g7dc7d9a-1`。该提交在 r1535 基线上增加无 tccd 的 EC-only 热键服务；
+当前配方固定源码提交 `256cd0a803af59233da533cdc635c341197cdd31`，包版本为
+`0.1.0.r1535.g256cd0a-1`。该提交在 r1535 基线上增加无 tccd 的 EC-only 热键服务并同步 UEFI PowerMode；
 发布收据仍对应旧的 r1535-2 包，不表示新包已经发布或完成整包验收。
 该配方已发布到独立的 [AUR 包](https://aur.archlinux.org/packages/mechrevo-console)，
 签名安装包与配方源包见 [GitHub Release](https://github.com/LIghtJUNction/mechrevo-drivers/releases/tag/console-v0.1.0-r1535-2)。
@@ -85,8 +85,8 @@ Rust 使用 `-C target-cpu=x86-64`；三个 ELF 产物均需检查 GNU ISA 属�
 检查包内容和部署材料后，通过 pacman 安装本地产物：
 
 ```sh
-pacman -Qlp mechrevo-console-0.1.0.r1535.g7dc7d9a-1-x86_64.pkg.tar.zst
-sudo pacman -U ./mechrevo-console-0.1.0.r1535.g7dc7d9a-1-x86_64.pkg.tar.zst
+pacman -Qlp mechrevo-console-0.1.0.r1535.g256cd0a-1-x86_64.pkg.tar.zst
+sudo pacman -U ./mechrevo-console-0.1.0.r1535.g256cd0a-1-x86_64.pkg.tar.zst
 mechrevo-console --version
 mechrevo-console status --json
 ```
