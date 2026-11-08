@@ -1,5 +1,6 @@
 """Regression tests for the physical performance-mode cycle."""
 import importlib.util
+import errno
 import fcntl
 import io
 import json
@@ -7,6 +8,7 @@ import os
 from pathlib import Path
 import select
 import struct
+import tempfile
 import unittest
 from contextlib import ExitStack, redirect_stdout
 from unittest import mock
@@ -402,6 +404,8 @@ class EcOnlyHotkeyStreamTests(unittest.TestCase):
         self.sync_led = stack.enter_context(mock.patch.object(control, "sync_mode_led_from_profile"))
         self.get_profile = stack.enter_context(mock.patch.object(control, "get_current_mode_info"))
         self.touchpad = stack.enter_context(mock.patch.object(control, "toggle_touchpad"))
+        self.read_uefi = stack.enter_context(mock.patch.object(control, "read_uefi_power_mode", return_value=0))
+        self.write_uefi = stack.enter_context(mock.patch.object(control, "write_uefi_power_mode"))
         stack.enter_context(mock.patch.object(select, "select", side_effect=ready))
         stack.enter_context(redirect_stdout(io.StringIO()))
 
@@ -419,6 +423,19 @@ class EcOnlyHotkeyStreamTests(unittest.TestCase):
         self.sync_profiles.assert_not_called()
         self.sync_led.assert_not_called()
         self.get_profile.assert_not_called()
+
+    def test_ec_only_persists_uefi_power_mode_after_the_ec_cycle(self):
+        class Synced(BaseException):
+            pass
+        payload = b"".join(struct.pack("qqHHi", 0, 0, 1, code, value)
+                           for code, value in [(64, 1)])
+        self.run_pipe(payload)
+        with mock.patch.object(control, "cycle_hardware_mode", return_value="turbo"):
+            self.write_uefi.side_effect = Synced
+            with self.assertRaises(Synced):
+                control.run_daemon(ec_only=True)
+        self.write_uefi.assert_called_once_with("turbo")
+        self.read_uefi.assert_called_once_with()
 
     def test_ec_only_ignores_non_mode_keys(self):
         class ModeHandled(Exception):
@@ -438,6 +455,84 @@ class EcOnlyHotkeyStreamTests(unittest.TestCase):
         with self.assertRaisesRegex(OSError, "control device unavailable"):
             control.run_daemon(ec_only=True)
         self.sync_profiles.assert_not_called()
+
+
+class UefiPowerModeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "UniWillVariable"
+        raw = bytearray(184)
+        raw[:4] = b"\x07\x00\x00\x00"
+        raw[0x56] = 0
+        self.path.write_bytes(raw)
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(mock.patch.object(control, "uefi_power_mode_supported", return_value=True))
+        self.stack.enter_context(mock.patch.object(control, "UEFI_POWER_MODE_EFIVAR", self.path))
+        self.immutable = self.stack.enter_context(
+            mock.patch.object(control, "_efivar_immutable", return_value=False))
+        self.set_immutable = self.stack.enter_context(
+            mock.patch.object(control, "_set_efivar_immutable"))
+
+    def test_reads_the_documented_power_mode_offset(self):
+        for value in (0, 1, 2, 3):
+            raw = bytearray(self.path.read_bytes())
+            raw[0x56] = value
+            self.path.write_bytes(raw)
+            self.assertEqual(control.read_uefi_power_mode(), value)
+
+    def test_writes_only_the_power_mode_byte(self):
+        raw = bytearray(self.path.read_bytes())
+        raw[0x10] = 0xaa
+        raw[0x57] = 0xbb
+        self.path.write_bytes(raw)
+        self.assertEqual(control.write_uefi_power_mode("office"), 1)
+        actual = self.path.read_bytes()
+        self.assertEqual(actual[:4], b"\x07\x00\x00\x00")
+        self.assertEqual(actual[0x56], 1)
+        self.assertEqual(actual[0x10], 0xaa)
+        self.assertEqual(actual[0x57], 0xbb)
+        self.assertEqual(len(actual), len(raw))
+
+    def test_round_trips_all_ordinary_modes(self):
+        for key, value in (("office", 1), ("gaming", 0), ("turbo", 2)):
+            with self.subTest(key=key):
+                self.assertEqual(control.write_uefi_power_mode(key), value)
+                self.assertEqual(control.read_uefi_power_mode(), value)
+
+    def test_immutable_flag_is_restored(self):
+        self.immutable.return_value = True
+        control.write_uefi_power_mode("turbo")
+        self.assertEqual(self.set_immutable.call_args_list,
+                         [mock.call(self.path, False), mock.call(self.path, True)])
+
+    def test_unsupported_identity_does_not_touch_nvram(self):
+        with mock.patch.object(control, "uefi_power_mode_supported", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "not supported"):
+                control.write_uefi_power_mode("turbo")
+        self.assertEqual(self.path.read_bytes()[0x56], 0)
+
+    def test_short_variable_is_rejected(self):
+        self.path.write_bytes(b"\x07\x00\x00\x00short")
+        with self.assertRaisesRegex(RuntimeError, "too short"):
+            control.write_uefi_power_mode("turbo")
+
+    def test_unknown_mode_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Unknown UEFI PowerMode"):
+            control.write_uefi_power_mode("fan-boost")
+
+    def test_efivarfs_fsync_einval_is_accepted(self):
+        with mock.patch.object(control.os, "fsync",
+                               side_effect=OSError(errno.EINVAL, "efivarfs fsync")):
+            self.assertEqual(control.write_uefi_power_mode("turbo"), 2)
+        self.assertEqual(self.path.read_bytes()[0x56], 2)
+
+    def test_other_fsync_errors_are_visible(self):
+        with mock.patch.object(control.os, "fsync",
+                               side_effect=OSError(errno.EIO, "disk error")):
+            with self.assertRaisesRegex(OSError, "disk error"):
+                control.write_uefi_power_mode("turbo")
 
 
 if __name__ == "__main__":

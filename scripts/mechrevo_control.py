@@ -16,6 +16,7 @@ Gaming Center to Linux on the GM6PX0X (and compatible) platforms:
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import json
 import os
@@ -607,6 +608,117 @@ def cycle_hardware_mode() -> str:
     return next_name
 
 
+UEFI_POWER_MODE_EFIVAR = Path(
+    "/sys/firmware/efi/efivars/UniWillVariable-9f33f85c-13ca-4fd1-9c4a-96217722c593"
+)
+UEFI_POWER_MODE_DATA_OFFSET = 0x52
+UEFI_POWER_MODE_FILE_OFFSET = 4 + UEFI_POWER_MODE_DATA_OFFSET
+UEFI_POWER_MODE_VALUES = {
+    # NVRAM_STRUCT.PowerMode: Gaming=0, Office=1, Turbo=2, Custom=3.
+    "office": 1,
+    "gaming": 0,
+    "gaming-quiet": 0,
+    "turbo": 2,
+    "boost": 2,
+}
+_DMI_ID = Path("/sys/class/dmi/id")
+
+
+def _dmi_text(name: str) -> str | None:
+    try:
+        return (_DMI_ID / name).read_text().strip()
+    except OSError:
+        return None
+
+
+def uefi_power_mode_supported() -> bool:
+    """Only touch NVRAM on the exact model whose layout was verified."""
+    return (_dmi_text("sys_vendor") == "MECHREVO"
+            and _dmi_text("board_name") == "GM6BG0Q"
+            and _dmi_text("product_name") == "Jiaolong16K Series GM6BG0Q"
+            and _dmi_text("bios_version") == "N.1.19MRO15"
+            and UEFI_POWER_MODE_EFIVAR.is_file())
+
+
+def _efivar_immutable(path: Path) -> bool:
+    text = run_cmd(["lsattr", "-d", str(path)])
+    return "i" in text.split()[0]
+
+
+def _set_efivar_immutable(path: Path, immutable: bool) -> None:
+    run_cmd(["chattr", "+i" if immutable else "-i", str(path)])
+
+
+def read_uefi_power_mode() -> int:
+    """Read NVRAM_STRUCT.PowerMode from the UniWill UEFI variable."""
+    if not uefi_power_mode_supported():
+        raise RuntimeError("UniWill UEFI PowerMode is not supported on this machine")
+    raw = UEFI_POWER_MODE_EFIVAR.read_bytes()
+    if len(raw) <= UEFI_POWER_MODE_FILE_OFFSET:
+        raise RuntimeError(f"UniWill UEFI variable is too short: {len(raw)} bytes")
+    value = raw[UEFI_POWER_MODE_FILE_OFFSET]
+    if value > 3:
+        raise RuntimeError(f"Unknown UniWill UEFI PowerMode byte: 0x{value:02x}")
+    return value
+
+
+def write_uefi_power_mode(mode_key: str) -> int:
+    """Persist the selected mode in NVRAM while preserving every other byte.
+
+    efivarfs exposes the four attribute bytes followed by the variable data.
+    The file is normally immutable; clear that flag, write the complete
+    variable, verify the exact readback, then restore the flag.
+    """
+    if mode_key not in UEFI_POWER_MODE_VALUES:
+        raise ValueError(f"Unknown UEFI PowerMode key: {mode_key}")
+    if not uefi_power_mode_supported():
+        raise RuntimeError("UniWill UEFI PowerMode is not supported on this machine")
+
+    target = UEFI_POWER_MODE_VALUES[mode_key]
+    raw = bytearray(UEFI_POWER_MODE_EFIVAR.read_bytes())
+    if len(raw) <= UEFI_POWER_MODE_FILE_OFFSET:
+        raise RuntimeError(f"UniWill UEFI variable is too short: {len(raw)} bytes")
+    current = raw[UEFI_POWER_MODE_FILE_OFFSET]
+    if current > 3:
+        raise RuntimeError(f"Unknown UniWill UEFI PowerMode byte: 0x{current:02x}")
+    if current == target:
+        return target
+
+    raw[UEFI_POWER_MODE_FILE_OFFSET] = target
+    immutable = _efivar_immutable(UEFI_POWER_MODE_EFIVAR)
+    try:
+        if immutable:
+            _set_efivar_immutable(UEFI_POWER_MODE_EFIVAR, False)
+        fd = os.open(UEFI_POWER_MODE_EFIVAR, os.O_WRONLY | os.O_CLOEXEC)
+        try:
+            pending = memoryview(raw)
+            while pending:
+                written = os.write(fd, pending)
+                if written <= 0:
+                    raise OSError("short write to efivarfs")
+                pending = pending[written:]
+            try:
+                os.fsync(fd)
+            except OSError as exc:
+                # efivarfs rejects fsync with EINVAL; its write path is
+                # synchronous and the readback below is the durable check.
+                if exc.errno != errno.EINVAL:
+                    raise
+        finally:
+            os.close(fd)
+        actual = UEFI_POWER_MODE_EFIVAR.read_bytes()
+        if len(actual) != len(raw) or actual[:4] != raw[:4]:
+            raise RuntimeError("UniWill UEFI variable changed size or attributes")
+        if actual[UEFI_POWER_MODE_FILE_OFFSET] != target:
+            raise RuntimeError(
+                "UniWill UEFI PowerMode readback mismatch: "
+                f"requested {target}, got {actual[UEFI_POWER_MODE_FILE_OFFSET]}"
+            )
+    finally:
+        if immutable:
+            _set_efivar_immutable(UEFI_POWER_MODE_EFIVAR, True)
+    return target
+
 PROFILE_MODE_KEYS = {
     "__default_custom_profile__": "gaming",
     "mechrevo_office": "office",
@@ -737,6 +849,12 @@ def run_daemon(ec_only: bool = False) -> None:
         # after the module/device appears.
         initial_mode = read_hardware_mode()
         print(f"[*] 当前 EC 模式字节: 0x{initial_mode:02x}（不依赖 tccd）")
+        try:
+            uefi_mode = read_uefi_power_mode()
+        except Exception as exc:
+            print(f"[!] UEFI PowerMode 读取失败: {exc}", file=sys.stderr)
+        else:
+            print(f"[*] 当前 UEFI PowerMode: {uefi_mode}")
         last_profile_id = None
     else:
         print(f"[*] 机械革命硬件热键守护进程已启动，监听设备: {target_dev}")
@@ -778,6 +896,12 @@ def run_daemon(ec_only: bool = False) -> None:
                         if ec_only:
                             mode = cycle_hardware_mode()
                             print(f"[*] 实体模式键 -> EC 模式 {mode}")
+                            try:
+                                uefi_mode = write_uefi_power_mode(mode)
+                            except Exception as exc:
+                                print(f"[!] UEFI PowerMode 同步失败: {exc}", file=sys.stderr)
+                            else:
+                                print(f"[*] UEFI PowerMode -> {uefi_mode}")
                         else:
                             print("[*] 捕捉到机身实体模式按键触发！执行模式切换...")
                             cycle_mode(notify=True)

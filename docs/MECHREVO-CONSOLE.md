@@ -31,15 +31,25 @@ GM6BG0Q 的实体模式键已经由 `tuxedo_keyboard` 驱动确认为 WMI `0xB0`
 并逐次回读 EC 模式字节；不调用 tccd、D-Bus、TCC profile 或 PL/fan 策略。root 权限是必要的：
 `/dev/tuxedo_io` 为 `0600 root:root`，输入节点为 `0660 root:input`。
 
+切换成功后还会同步 UEFI `UniWillVariable` 的 `PowerMode`，对应关系为
+Gaming=0、Office=1、Turbo=2；变量数据偏移 `0x52`（efivar 文件偏移 `0x56`，前面
+是 4 字节属性）。只对精确的 `MECHREVO / GM6BG0Q / Jiaolong16K Series GM6BG0Q /
+N.1.19MRO15` 生效，保留其余全部字节和属性，清除/恢复 efivarfs 的 immutable 位，
+并在写入后重新读取整个变量做逐字节回读。efivarfs 对 `fsync` 返回 `EINVAL`，写入路径
+按同步写处理并忽略该 `EINVAL`；其它错误仍然上报。UEFI 写失败只记录错误，不回滚已经
+完成的 EC 模式切换。
+
 ```sh
 # 两个热键处理者只能选一个，避免同一次按键切两档
 systemctl --user disable --now mechrevo-gaming-hotkey.service
 systemctl enable --now mechrevo-ec-hotkey.service
 ```
 
-本机以临时 root 脚本验证了 F6 → `0x00`/`0xA0`/`0x10` 的真实 ioctl 写读回环，并恢复
-`0x00`。EC-only 服务本身尚需安装后验收；它只证明模式字节和回读，不证明底盘灯珠实际亮灭、
-持续功耗、风扇 RPM 或 TCC profile 已被应用。
+本机已安装并运行该服务：启动时读到 EC `0xA0`、UEFI `PowerMode=0`；按三次 F6 后日志为
+Gaming `0x00`/UEFI 0、Turbo `0x10`/UEFI 2、Office `0xA0`/UEFI 1，最终 EC 与 UEFI
+一致为 Office。另以受控写读回环验证了 UEFI 值 `0→2→1→0` 并恢复原文件哈希；除文件偏移
+`0x56` 外无字节变化，immutable 位恢复。这里只证明模式字节和 UEFI 字段回读，不证明底盘
+灯珠实际亮灭、持续功耗、风扇 RPM 或 TCC profile 已被应用。
 
 ## r160 历史安装基线（2026-10-18）
 
