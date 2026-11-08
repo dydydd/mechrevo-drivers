@@ -69,6 +69,7 @@ TOUCHPAD_I2C_DEVICE = "i2c-UNIW0001:00"
 TOUCHPAD_BIND_PATH = Path("/sys/bus/i2c/drivers/i2c_hid_acpi/bind")
 TOUCHPAD_UNBIND_PATH = Path("/sys/bus/i2c/drivers/i2c_hid_acpi/unbind")
 TOUCHPAD_BOUND_CHECK = Path(f"/sys/bus/i2c/drivers/i2c_hid_acpi/{TOUCHPAD_I2C_DEVICE}")
+TOUCHPAD_DEVICE_PATH = Path(f"/sys/bus/i2c/devices/{TOUCHPAD_I2C_DEVICE}")
 
 # Local cooling defaults: keep at least 60% in normal modes. This floor was
 # exercised on GM6PX0X; it is a control request, not a guaranteed RPM or OEM curve.
@@ -1063,6 +1064,29 @@ def set_touchpad(enabled: bool) -> None:
     print(f"[✓] 机械革命触控板状态: {state_str}")
 
 
+def restore_touchpad_state(timeout: float = 10.0) -> bool | None:
+    """Reapply the saved hardware touchpad state after resume.
+
+    Returns None when no state was saved. The i2c device may appear a moment
+    after resume, so wait for it before bind/unbind; otherwise a late device
+    registration could silently undo the saved off state.
+    """
+    state_file = get_state_file("touchpad_state")
+    if not state_file.exists():
+        return None
+    value = state_file.read_text().strip()
+    if value not in {"0", "1"}:
+        raise RuntimeError(f"Invalid saved touchpad state: {value!r}")
+    enabled = value == "1"
+    deadline = time.monotonic() + timeout
+    while not TOUCHPAD_DEVICE_PATH.exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"Touchpad device did not reappear: {TOUCHPAD_DEVICE_PATH}")
+        time.sleep(0.25)
+    set_touchpad(enabled)
+    return enabled
+
+
 # ==============================================================================
 # 5. Fn Lock
 # ==============================================================================
@@ -1401,7 +1425,7 @@ def main() -> int:
 
     # touchpad
     p_tp = subparsers.add_parser("touchpad", help="笔记本触控板硬件开关")
-    p_tp.add_argument("action", nargs="?", choices=["on", "off", "toggle", "status"], default="status")
+    p_tp.add_argument("action", nargs="?", choices=["on", "off", "toggle", "status", "restore"], default="status")
 
     # fn-lock
     p_fn = subparsers.add_parser("fn-lock", help="Fn 快捷键锁控制")
@@ -1463,6 +1487,12 @@ def main() -> int:
                 set_touchpad(False)
             elif args.action == "toggle":
                 set_touchpad(not get_touchpad())
+            elif args.action == "restore":
+                restored = restore_touchpad_state()
+                if restored is None:
+                    print("没有保存的触控板硬件状态，跳过恢复")
+                else:
+                    print(f"已恢复触控板硬件状态: {'开启' if restored else '禁用'}")
             else:
                 print(f"触控板状态: {'已启用' if get_touchpad() else '已禁用'}")
         elif args.command == "fn-lock":

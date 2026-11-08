@@ -59,6 +59,26 @@ systemctl enable --now mechrevo-ec-hotkey.service
 写入本机 EC 做满载验收**；需要重载新驱动、安装新脚本并单独做受控高功率测试。这里也
 不证明底盘灯珠实际亮灭、持续功耗、风扇 RPM 或 TCC profile 已被应用。
 
+### 触控板熄屏/恢复
+
+KDE 的触控板开关是 libinput 会话状态，不是 i2c 硬件锁。`kcminputrc` 里
+`Enabled=false` 时 i2c 设备仍可能绑定；熄屏/恢复后 KWin 重新应用 per-device
+状态失败，触控板就会回到默认开启。仓库的 `mechrevo-control touchpad off`
+走 i2c unbind，并写入 `/var/lib/mechrevo-control/touchpad_state`。
+
+新增 system-sleep hook `/usr/lib/systemd/system-sleep/mechrevo-touchpad`：
+恢复（`post`）后读取保存状态，等待 `i2c-UNIW0001:00` 重新出现，再执行
+`mechrevo-control touchpad restore`，保持关闭或开启。它只恢复由
+`mechrevo-control touchpad off|on` 写入的状态；只在 KDE 里关闭不会生成该文件，
+hook 因此不做任何事。
+
+```sh
+sudo mechrevo-control touchpad off   # 硬件锁，写入持久状态
+mechrevo-control touchpad status     # 查看 i2c 绑定状态
+```
+
+该 hook 是 root 执行的 systemd-sleep 脚本，不依赖 tccd 或 EC-only 热键服务。
+
 ## r160 历史安装基线（2026-10-18）
 
 `mechrevo-console 0.1.0.r160.g5542b9d-1` 已从固定提交 `5542b9d66eb3bb95b2edd07e4f2fe94afc36ea60` 构建并通过 pacman 安装。CLI、GUI、受限 OEM helper 与授权策略已落盘；21 个包文件零改动，9 个正规载荷的字节、权限及 root 归属逐项一致。release 的 31 份输入与通过 146 项 Rust、95 项 Python 检查的快照相同；release 与早期 debug 候选的二进制摘要分别保留。

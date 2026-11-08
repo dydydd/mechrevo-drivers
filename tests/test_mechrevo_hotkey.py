@@ -588,5 +588,69 @@ class ModeTdpProfileTests(unittest.TestCase):
         opened.assert_not_called()
 
 
+class TouchpadRestoreTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name) / "touchpad_state"
+        self.device = Path(self.tmp.name) / "i2c-UNIW0001:00"
+        self.device.mkdir()
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(mock.patch.object(control, "get_state_file", return_value=self.state))
+        self.stack.enter_context(mock.patch.object(control, "TOUCHPAD_DEVICE_PATH", self.device))
+        self.set = self.stack.enter_context(mock.patch.object(control, "set_touchpad"))
+
+    def test_restores_saved_off_and_on_states(self):
+        for value, enabled in (("0", False), ("1", True)):
+            with self.subTest(value=value):
+                self.state.write_text(value)
+                self.set.reset_mock()
+                self.assertEqual(control.restore_touchpad_state(), enabled)
+                self.set.assert_called_once_with(enabled)
+
+    def test_missing_state_is_a_noop(self):
+        self.assertIsNone(control.restore_touchpad_state())
+        self.set.assert_not_called()
+
+    def test_invalid_state_is_rejected(self):
+        self.state.write_text("2")
+        with self.assertRaisesRegex(RuntimeError, "Invalid saved touchpad state"):
+            control.restore_touchpad_state()
+        self.set.assert_not_called()
+
+    def test_waits_for_late_i2c_device_then_applies_state(self):
+        self.state.write_text("0")
+        device = mock.Mock()
+        device.exists.side_effect = [False, True]
+        with mock.patch.object(control, "TOUCHPAD_DEVICE_PATH", device), \
+                mock.patch.object(control.time, "monotonic", side_effect=[0.0, 0.0]), \
+                mock.patch.object(control.time, "sleep") as sleep:
+            self.assertEqual(control.restore_touchpad_state(), False)
+        sleep.assert_called_once_with(0.25)
+        self.set.assert_called_once_with(False)
+
+    def test_timeout_is_visible(self):
+        self.state.write_text("0")
+        device = mock.Mock()
+        device.exists.return_value = False
+        with mock.patch.object(control, "TOUCHPAD_DEVICE_PATH", device), \
+                mock.patch.object(control.time, "monotonic", side_effect=[0.0, 11.0]), \
+                mock.patch.object(control.time, "sleep"), \
+                self.assertRaisesRegex(RuntimeError, "did not reappear"):
+            control.restore_touchpad_state()
+        self.set.assert_not_called()
+
+
+class TouchpadSleepHookTests(unittest.TestCase):
+    def test_hook_is_executable_and_only_runs_post(self):
+        hook = ROOT / "scripts/mechrevo-touchpad-sleep"
+        self.assertTrue(os.access(hook, os.X_OK))
+        text = hook.read_text()
+        self.assertIn('[ "${1:-}" = "post" ]', text)
+        self.assertIn("/var/lib/mechrevo-control/touchpad_state", text)
+        self.assertIn("/usr/bin/mechrevo-control touchpad restore", text)
+
+
 if __name__ == "__main__":
     unittest.main()

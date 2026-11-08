@@ -25,6 +25,7 @@ REQUIRED_SOURCE = (
     "scripts/mechrevo_control.py",
     "scripts/mechrevo-gaming-hotkey.service",
     "scripts/mechrevo-ec-hotkey.service",
+    "scripts/mechrevo-touchpad-sleep",
     "console/crates/gui/assets/fonts/Cormorant-OFL.txt",
     "console/crates/gui/assets/fonts/Manrope-OFL.txt",
     "docs/MECHREVO-CONSOLE.md",
