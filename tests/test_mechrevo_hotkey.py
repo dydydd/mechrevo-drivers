@@ -406,6 +406,7 @@ class EcOnlyHotkeyStreamTests(unittest.TestCase):
         self.touchpad = stack.enter_context(mock.patch.object(control, "toggle_touchpad"))
         self.read_uefi = stack.enter_context(mock.patch.object(control, "read_uefi_power_mode", return_value=0))
         self.write_uefi = stack.enter_context(mock.patch.object(control, "write_uefi_power_mode"))
+        self.apply_tdp = stack.enter_context(mock.patch.object(control, "apply_mode_tdp", return_value=(95, 95, 215)))
         stack.enter_context(mock.patch.object(select, "select", side_effect=ready))
         stack.enter_context(redirect_stdout(io.StringIO()))
 
@@ -434,6 +435,7 @@ class EcOnlyHotkeyStreamTests(unittest.TestCase):
             self.write_uefi.side_effect = Synced
             with self.assertRaises(Synced):
                 control.run_daemon(ec_only=True)
+        self.apply_tdp.assert_called_once_with("turbo")
         self.write_uefi.assert_called_once_with("turbo")
         self.read_uefi.assert_called_once_with()
 
@@ -533,6 +535,57 @@ class UefiPowerModeTests(unittest.TestCase):
                                side_effect=OSError(errno.EIO, "disk error")):
             with self.assertRaisesRegex(OSError, "disk error"):
                 control.write_uefi_power_mode("turbo")
+
+
+class ModeTdpProfileTests(unittest.TestCase):
+    def setUp(self):
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(mock.patch.object(control.Path, "exists", return_value=True))
+        self.stack.enter_context(mock.patch.object(control.os, "open", return_value=7))
+        self.close = self.stack.enter_context(mock.patch.object(control.os, "close"))
+        self.values = [0, 0, 0]
+        self.writes = []
+        self.ioctl = self.stack.enter_context(mock.patch.object(control.fcntl, "ioctl", side_effect=self.mode_ioctl))
+
+    def mode_ioctl(self, fd, command, argument, *_):
+        self.assertEqual(fd, 7)
+        if command in control.W_UW_TDP:
+            index = control.W_UW_TDP.index(command)
+            self.values[index] = struct.unpack("i", argument)[0]
+            self.writes.append((index, self.values[index]))
+        else:
+            index = control.R_UW_TDP.index(command)
+            argument[:4] = struct.pack("i", self.values[index])
+        return 0
+
+    def test_each_package_profile_writes_and_reads_pl1_pl2_pl4(self):
+        for mode, values in (("office", (35, 35, 215)),
+                             ("gaming", (80, 80, 215)),
+                             ("turbo", (95, 95, 215))):
+            with self.subTest(mode=mode):
+                self.values = [0, 0, 0]
+                self.writes = []
+                self.assertEqual(control.apply_mode_tdp(mode), values)
+                self.assertEqual(tuple(self.values), values)
+                self.assertEqual(self.writes, [(0, values[0]), (1, values[1]), (2, values[2])])
+
+    def test_readback_mismatch_is_visible(self):
+        def mismatched(_fd, command, argument, *_):
+            if command in control.W_UW_TDP:
+                return 0
+            index = control.R_UW_TDP.index(command)
+            argument[:4] = struct.pack("i", 100 if index == 2 else 35)
+            return 0
+        with mock.patch.object(control.fcntl, "ioctl", side_effect=mismatched), \
+                self.assertRaisesRegex(RuntimeError, "TDP readback mismatch"):
+            control.apply_mode_tdp("office")
+
+    def test_unknown_mode_is_rejected_before_open(self):
+        with mock.patch.object(control.os, "open") as opened, \
+                self.assertRaisesRegex(ValueError, "Unknown TDP mode"):
+            control.apply_mode_tdp("fan-boost")
+        opened.assert_not_called()
 
 
 if __name__ == "__main__":

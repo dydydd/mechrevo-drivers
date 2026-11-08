@@ -8,7 +8,8 @@
 - 用户级 `mechrevo-gaming-hotkey.service`：需要可用的 tccd/D-Bus，在实体按键、GUI 或
   电源状态切换后同步 TCC profile 与机身性能档位灯。
 - 系统级 `mechrevo-ec-hotkey.service`：root、无 tccd 依赖，只监听 F6，通过
-  `/dev/tuxedo_io` 切换 EC 模式字节，并同步 UEFI `UniWillVariable.PowerMode`。
+  `/dev/tuxedo_io` 切换 EC 模式字节，按 Windows 54919 profile 写 PL1/PL2/PL4，
+  并同步 UEFI `UniWillVariable.PowerMode`。
 
 只能启用一个，否则同一次按键会切两档：
 

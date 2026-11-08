@@ -662,6 +662,41 @@ def read_uefi_power_mode() -> int:
     return value
 
 
+EC_MODE_TDP = {
+    # Windows Control Center 5.17.49.19 profile values: PL1, PL2, PL4.
+    "office": (35, 35, 215),
+    "gaming": (80, 80, 215),
+    "gaming-quiet": (80, 80, 215),
+    "turbo": (95, 95, 215),
+    "boost": (95, 95, 215),
+}
+W_UW_TDP = (0x4008F015, 0x4008F016, 0x4008F017)
+R_UW_TDP = (0x8008F018, 0x8008F019, 0x8008F01A)
+
+
+def apply_mode_tdp(mode_key: str) -> tuple[int, int, int]:
+    """Apply the package PL1/PL2/PL4 profile through tuxedo_io and verify it."""
+    if mode_key not in EC_MODE_TDP:
+        raise ValueError(f"Unknown TDP mode key: {mode_key}")
+    if not EC_CONTROL_DEVICE.exists():
+        raise RuntimeError(f"Uniwill control device is unavailable: {EC_CONTROL_DEVICE}")
+    values = EC_MODE_TDP[mode_key]
+    fd = os.open(EC_CONTROL_DEVICE, os.O_RDWR)
+    try:
+        for command, value in zip(W_UW_TDP, values):
+            fcntl.ioctl(fd, command, struct.pack("i", value))
+        actual = []
+        for command in R_UW_TDP:
+            readback = bytearray(8)
+            fcntl.ioctl(fd, command, readback, True)
+            actual.append(struct.unpack("i", readback[:4])[0])
+    finally:
+        os.close(fd)
+    if tuple(actual) != values:
+        raise RuntimeError(f"TDP readback mismatch: requested {values}, got {tuple(actual)}")
+    return values
+
+
 def write_uefi_power_mode(mode_key: str) -> int:
     """Persist the selected mode in NVRAM while preserving every other byte.
 
@@ -896,6 +931,12 @@ def run_daemon(ec_only: bool = False) -> None:
                         if ec_only:
                             mode = cycle_hardware_mode()
                             print(f"[*] 实体模式键 -> EC 模式 {mode}")
+                            try:
+                                tdp = apply_mode_tdp(mode)
+                            except Exception as exc:
+                                print(f"[!] TDP profile apply failed: {exc}", file=sys.stderr)
+                            else:
+                                print(f"[*] PL1/PL2/PL4 -> {tdp[0]}/{tdp[1]}/{tdp[2]} W")
                             try:
                                 uefi_mode = write_uefi_power_mode(mode)
                             except Exception as exc:

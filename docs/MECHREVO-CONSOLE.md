@@ -28,8 +28,13 @@ GM6BG0Q 的实体模式键已经由 `tuxedo_keyboard` 驱动确认为 WMI `0xB0`
 新增 root 系统服务 `mechrevo-ec-hotkey.service`，执行
 `mechrevo-control daemon --ec-only`：只监听 F6，通过 `/dev/tuxedo_io` 的
 `W_UW_MODE`/`R_UW_MODE` 在办公 `0xA0` → 游戏 `0x00` → Turbo `0x10` 之间循环，
-并逐次回读 EC 模式字节；不调用 tccd、D-Bus、TCC profile 或 PL/fan 策略。root 权限是必要的：
+并逐次回读 EC 模式字节；不调用 tccd 或 D-Bus。root 权限是必要的：
 `/dev/tuxedo_io` 为 `0600 root:root`，输入节点为 `0660 root:input`。
+
+每次切模式后还会按 Windows Control Center 5.17.49.19 的 `UserPofiles` 应用
+PL1/PL2/PL4：Office `35/35/215`、Gaming `80/80/215`、Turbo `95/95/215`，
+通过 `W_UW_TDP0/1/2` 写入并逐项回读。`TccOffset=5`、cTGP、Dynamic Boost 和
+安装包里的用户风扇表没有在本服务中写入；EC 模式字节仍负责 EC 自身的风扇策略。
 
 切换成功后还会同步 UEFI `UniWillVariable` 的 `PowerMode`，对应关系为
 Gaming=0、Office=1、Turbo=2；变量数据偏移 `0x52`（efivar 文件偏移 `0x56`，前面
@@ -45,11 +50,14 @@ systemctl --user disable --now mechrevo-gaming-hotkey.service
 systemctl enable --now mechrevo-ec-hotkey.service
 ```
 
-本机已安装并运行该服务：启动时读到 EC `0xA0`、UEFI `PowerMode=0`；按三次 F6 后日志为
-Gaming `0x00`/UEFI 0、Turbo `0x10`/UEFI 2、Office `0xA0`/UEFI 1，最终 EC 与 UEFI
-一致为 Office。另以受控写读回环验证了 UEFI 值 `0→2→1→0` 并恢复原文件哈希；除文件偏移
-`0x56` 外无字节变化，immutable 位恢复。这里只证明模式字节和 UEFI 字段回读，不证明底盘
-灯珠实际亮灭、持续功耗、风扇 RPM 或 TCC profile 已被应用。
+上一版 EC-only 服务已在本机安装并运行：启动时读到 EC `0xA0`、UEFI `PowerMode=0`；
+按三次 F6 后日志为 Gaming `0x00`/UEFI 0、Turbo `0x10`/UEFI 2、Office `0xA0`/UEFI 1，
+最终 EC 与 UEFI 一致为 Office。UEFI 受控写读回环验证了 `0→2→1→0` 并恢复原文件哈希；
+除文件偏移 `0x56` 外无字节变化，immutable 位恢复。
+
+新增的 Windows profile TDP 写入目前只有源码和 mock 回归，**没有把 95 W / PL4 215 W
+写入本机 EC 做满载验收**；需要重载新驱动、安装新脚本并单独做受控高功率测试。这里也
+不证明底盘灯珠实际亮灭、持续功耗、风扇 RPM 或 TCC profile 已被应用。
 
 ## r160 历史安装基线（2026-10-18）
 
