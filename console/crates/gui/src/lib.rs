@@ -887,6 +887,7 @@ mod tests {
             }],
             diagnostics: vec![],
             oem_controls: vec![],
+            energy: Default::default(),
         }
     }
 

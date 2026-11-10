@@ -1,0 +1,11 @@
+[Unit]
+Description=Sample MECHREVO console energy every 20 seconds
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=20s
+AccuracySec=2s
+Unit=mechrevo-console-energy.service
+
+[Install]
+WantedBy=timers.target

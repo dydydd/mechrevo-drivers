@@ -6,6 +6,9 @@ post_install() {
     printf '%s\n' '  EC-only:   systemctl disable --now mechrevo-gaming-hotkey.service 2>/dev/null || true'
     printf '%s\n' '             systemctl enable --now mechrevo-ec-hotkey.service'
     printf '%s\n' 'touchpad: use mechrevo-control touchpad off|on; the installed system-sleep hook restores that hardware state after resume.'
+    printf '%s\n' 'energy: CPU package counters are root-only. To keep daily energy sampling:'
+    printf '%s\n' '        systemctl enable --now mechrevo-console-energy.timer'
+    printf '%s\n' '        (opt-in, read-only sampler; write /var/lib/mechrevo-console/energy.json)'
 }
 
 post_upgrade() {

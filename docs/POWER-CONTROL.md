@@ -3,7 +3,8 @@
 `mechrevo-power-control` 是独立、可选的用户态工具。它配置本机的 Intel RAPL
 长期功耗约束（PL1），由原生 `thermald` 继续温控，也可显式提前 CPU 软件降温阈值。
 它不开放 MECHREVO EC TDP
-接口，也不提供 GPU、风扇或整机总功耗调节。
+接口，也不提供 GPU、风扇或整机总功耗调节。只读的实时功耗与今日用电统计见
+[控制台功耗面板](MECHREVO-CONSOLE.md#功耗与今日用电2026-11-10)，两者不共用写入路径。
 
 目前只允许以下组合：MECHREVO 旷世 16 Pro `GM6PX0X`、BIOS `N.1.09MRO07`、
 Intel Core i9-12900HX、`thermald 2.5.13`，并且本机必须满足程序检查的固件、

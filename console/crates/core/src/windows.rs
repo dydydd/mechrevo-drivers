@@ -207,6 +207,7 @@ pub(crate) fn snapshot() -> Snapshot {
         diagnostics,
         brightness: vec![],
         oem_controls: vec![],
+        energy: EnergyStatus::default(),
     }
 }
 // @mark mechrevo.os_power_policy role=implementation

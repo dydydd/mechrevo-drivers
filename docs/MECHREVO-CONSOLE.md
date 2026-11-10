@@ -79,6 +79,59 @@ mechrevo-control touchpad status     # 查看 i2c 绑定状态
 
 该 hook 是 root 执行的 systemd-sleep 脚本，不依赖 tccd 或 EC-only 热键服务。
 
+## 功耗与今日用电（2026-11-10）
+
+概览页新增“功耗与用电”面板，CLI 新增只读 `energy` 命令。数据来自运行时实际暴露的
+`hwmon` `power*_input`、powercap RAPL `energy_uj`、电池 `power_now`／
+`current_now × voltage_now` 和电池剩余能量；不读取 EC 私有寄存器，也不写入任何硬件。
+
+```sh
+mechrevo-console energy
+mechrevo-console energy --json
+mechrevo-console energy --sample
+```
+
+`energy --sample` 记录一次观测并更新今日账本，普通用户写入
+`$XDG_STATE_HOME/mechrevo-console/energy.json`（通常是
+`~/.local/state/mechrevo-console/energy.json`）；root 写入
+`/var/lib/mechrevo-console/energy.json`。账本按本机 DMI 身份隔离，只保留最近 32 天，
+写入使用同目录临时文件、`fsync` 和原子重命名，并带进程锁。
+
+### 统计口径
+
+- **电池放电**是唯一覆盖整机的功耗来源：`Power` 显示“电池放电 · 覆盖整机”，今日
+  “电池放电”是两次剩余能量之差。充电或满电时不把充电器输入当作电脑消耗。
+- **AC 供电**没有整机输入功率传感器。面板显示可读的部件功耗之和，并明确标注
+  “已测量部件 · 非整机功耗”；不包含屏幕、内存、硬盘、风扇、VRM 和适配器损耗。
+- **CPU 封装**来自 RAPL 累计计数器。计数器差值可以跨控制台关闭和休眠继续精确累计；
+  瞬时部件功耗只在两次采样间隔不超过 60 秒时积分，超过间隔不猜一个平均值。
+- RAPL `energy_uj` 在本机为 `0400 root:root`。普通用户会话会显示 CPU 不可用及原因，
+  不伪造 CPU 功耗。需要长期统计 CPU 的用户可启用只读系统采样器：
+
+```sh
+# 包已安装时；默认不启用，只读 sysfs 并写 /var/lib/mechrevo-console/energy.json
+sudo systemctl enable --now mechrevo-console-energy.timer
+systemctl status mechrevo-console-energy.timer
+mechrevo-console energy
+```
+
+采样器每 20 秒执行一次 `mechrevo-console energy --sample`，不修改功耗限制、风扇、
+EC 或任何策略。普通会话优先显示 120 秒内更新过的系统账本；系统采样停止后回落到
+本会话账本，并显示停止秒数，不合并两份账本以避免重复计费。首次观测只建立基线，
+面板显示“—”和基线提示，不会把 0 Wh 当作测得的零耗电。
+
+### 验证边界与未验证项
+
+- Rust 单元测试覆盖 RAPL 计数器跨长间隔与回绕、子域不重复计数、电池放电覆盖整机、
+  充电/满电不算消耗、首次采样基线、跨日重置、损坏账本、原子写入、部件未知值以及
+  CLI 的未知值与统计口径。
+- 本机普通用户实测可读到 `amdgpu` `power1_input`，CLI 显示对应瓦数；RAPL 不可读，
+  面板与 CLI 均显示 CPU 不可用。系统采样器需要 root，本次环境没有免密 root，
+  因此**没有在本机启用 timer 或核对 root 账本**。
+- 本机当前接电且电池满电，**没有做电池放电实机统计**。电池功率、放电能量差值及
+  AC／电池切换只在 fixture 测试中验证，不能当作本机整机续航或电费结论。
+- Windows 没有接入功耗账本；`Snapshot.energy` 为默认空值，CLI 显示不可用。
+
 ## r160 历史安装基线（2026-10-18）
 
 `mechrevo-console 0.1.0.r160.g5542b9d-1` 已从固定提交 `5542b9d66eb3bb95b2edd07e4f2fe94afc36ea60` 构建并通过 pacman 安装。CLI、GUI、受限 OEM helper 与授权策略已落盘；21 个包文件零改动，9 个正规载荷的字节、权限及 root 归属逐项一致。release 的 31 份输入与通过 146 项 Rust、95 项 Python 检查的快照相同；release 与早期 debug 候选的二进制摘要分别保留。

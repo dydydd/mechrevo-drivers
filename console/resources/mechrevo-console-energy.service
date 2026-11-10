@@ -1,0 +1,19 @@
+[Unit]
+Description=MECHREVO console energy sampler
+Documentation=file:/usr/share/doc/mechrevo-console/MECHREVO-CONSOLE.md
+# The sampler is read-only except for its own ledger. It is opt-in; installing
+# the console package does not enable it.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/mechrevo-console energy --sample
+UMask=0022
+StateDirectory=mechrevo-console
+StateDirectoryMode=0755
+ReadWritePaths=/var/lib/mechrevo-console
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+Nice=10
+IOSchedulingClass=idle

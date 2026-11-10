@@ -4,9 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 pub mod brightness;
 pub mod command;
+pub mod energy;
 pub mod oem;
 pub mod privilege;
 pub use brightness::{BrightnessApplyResult, BrightnessDevice, BrightnessPlan};
+pub use energy::{EnergyDay, EnergyLedger, EnergyStatus, PowerSource};
 pub use oem::{OemApplyResult, OemControl, OemControlKind, OemDomain, OemPlan, OemValue};
 #[cfg(any(target_os = "linux", test))]
 mod linux;
@@ -93,6 +95,8 @@ pub struct Snapshot {
     pub brightness: Vec<BrightnessDevice>,
     #[serde(default)]
     pub oem_controls: Vec<OemControl>,
+    #[serde(default)]
+    pub energy: EnergyStatus,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -449,6 +453,7 @@ fn unsupported_snapshot() -> Snapshot {
         power_policy: PowerPolicy::default(),
         brightness: vec![],
         oem_controls: vec![],
+        energy: EnergyStatus::default(),
         diagnostics: vec![Diagnostic {
             code: "unsupported_platform".into(),
             message: "Only Windows and Linux backends are implemented".into(),
@@ -527,6 +532,7 @@ mod tests {
             diagnostics: vec![],
             brightness: vec![],
             oem_controls: vec![],
+            energy: EnergyStatus::default(),
         };
         assert!(profile_available(&snapshot, PowerProfile::Performance));
         assert!(!profile_available(&snapshot, PowerProfile::PowerSaver));

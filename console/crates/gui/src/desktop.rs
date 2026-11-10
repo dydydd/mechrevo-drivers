@@ -2,11 +2,13 @@
 use crate::{appearance, reading_text, Controller, DisplayMode, JobKind, Preferences, Theme};
 use eframe::egui::{self, Color32, FontId, Rect, RichText, Stroke, Vec2};
 use mechrevo_console_core::{
-    CapabilityStatus, OemControlKind, OemDomain, OemValue, PowerProfile, SensorReading, Service,
+    energy, CapabilityStatus, EnergyDay, EnergyLedger, OemControlKind, OemDomain, OemValue,
+    PowerProfile, SensorReading, Service,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
-    time::{Duration, Instant},
+    path::PathBuf,
+    time::{Duration, Instant, SystemTime},
 };
 
 mod controls;
@@ -101,6 +103,178 @@ impl TemperatureHistory {
     }
 }
 
+#[derive(Default)]
+struct EnergyMonitor {
+    ledger: Option<EnergyLedger>,
+    path: Option<PathBuf>,
+    shared: Option<EnergyLedger>,
+    shared_path: Option<PathBuf>,
+    shared_age_seconds: Option<u64>,
+    machine: String,
+    loaded: bool,
+    disabled: bool,
+    last_saved: Option<Instant>,
+    observed: Option<Instant>,
+    error: Option<String>,
+}
+impl EnergyMonitor {
+    fn observe(
+        &mut self,
+        snapshot: Option<&mechrevo_console_core::Snapshot>,
+        refreshed: Option<Instant>,
+    ) {
+        // Initial fixtures and an app that has not refreshed are not live
+        // observations. Do not integrate wall-clock time into them.
+        let Some(snapshot) = snapshot else {
+            return;
+        };
+        if refreshed.is_none() || self.observed == refreshed {
+            return;
+        }
+        let machine = energy::machine_key(&snapshot.identity);
+        if !self.loaded && !self.disabled {
+            self.loaded = true;
+            self.path = energy::default_ledger_path();
+            self.shared_path = Some(PathBuf::from(energy::SHARED_LEDGER_PATH));
+            if let Some(path) = &self.path {
+                match energy::read_ledger(path) {
+                    Ok(ledger) => self.ledger = Some(ledger),
+                    Err(error) if error.code == "energy_ledger_missing" => {}
+                    Err(error) => {
+                        self.error = Some(format!("{}: {}", error.code, error.message));
+                    }
+                }
+            }
+        }
+        if self.machine != machine {
+            self.machine = machine.clone();
+            self.ledger = self
+                .ledger
+                .take()
+                .filter(|ledger| ledger.machine == machine)
+                .or_else(|| Some(EnergyLedger::new(&machine)));
+            self.shared = None;
+        }
+        if self.disabled {
+            self.observed = refreshed;
+            return;
+        }
+        let mut ledger = self
+            .ledger
+            .take()
+            .unwrap_or_else(|| EnergyLedger::new(&machine));
+        ledger.observe(&snapshot.energy, &machine, SystemTime::now());
+        self.ledger = Some(ledger);
+        self.refresh_shared();
+        self.observed = refreshed;
+        if self
+            .last_saved
+            .is_none_or(|saved| saved.elapsed() >= Duration::from_secs(30))
+        {
+            self.save();
+        }
+    }
+    fn refresh_shared(&mut self) {
+        let Some(path) = self.shared_path.as_deref() else {
+            return;
+        };
+        if self.path.as_deref() == Some(path) {
+            return;
+        }
+        let now_ms = energy::unix_now_ms().unwrap_or(0);
+        match energy::read_ledger(path) {
+            Ok(ledger) if ledger.machine == self.machine => {
+                let age = now_ms.saturating_sub(ledger.last.at_unix_ms.unwrap_or(0)) / 1000;
+                self.shared_age_seconds = Some(age);
+                self.shared = Some(ledger);
+            }
+            Ok(_) => {
+                self.shared = None;
+                self.shared_age_seconds = None;
+            }
+            Err(error)
+                if matches!(
+                    error.code.as_str(),
+                    "energy_ledger_missing" | "energy_ledger_read_failed"
+                ) =>
+            {
+                self.shared = None;
+                self.shared_age_seconds = None;
+            }
+            Err(error) => {
+                self.error = Some(format!("{}: {}", error.code, error.message));
+                self.shared = None;
+            }
+        }
+    }
+    fn shared_is_live(&self) -> bool {
+        self.shared.is_some()
+            && self
+                .shared_age_seconds
+                .is_some_and(|age| age <= energy::LEDGER_FRESH_SECONDS)
+    }
+    fn display(&self) -> Option<&EnergyLedger> {
+        if self.shared_is_live() {
+            self.shared.as_ref()
+        } else {
+            self.ledger.as_ref()
+        }
+    }
+    fn origin(&self) -> &'static str {
+        if self.shared_is_live()
+            || self.path.as_deref() == Some(std::path::Path::new(energy::SHARED_LEDGER_PATH))
+        {
+            "系统采样"
+        } else {
+            "本会话"
+        }
+    }
+    fn save(&mut self) {
+        if self.disabled {
+            return;
+        }
+        let (Some(path), Some(ledger)) = (self.path.as_deref(), self.ledger.as_ref()) else {
+            return;
+        };
+        match energy::write_ledger(path, ledger) {
+            Ok(()) => {
+                self.last_saved = Some(Instant::now());
+                self.error = None;
+            }
+            Err(error) => {
+                self.error = Some(format!("{}: {}", error.code, error.message));
+            }
+        }
+    }
+    fn save_now(&mut self) {
+        self.save();
+    }
+    fn today(&self) -> Option<&EnergyDay> {
+        self.display()
+            .and_then(|ledger| ledger.today(&energy::local_date(SystemTime::now())))
+    }
+    fn today_date(&self) -> String {
+        energy::local_date(SystemTime::now())
+    }
+    fn last_cpu_watts(&self) -> Option<f64> {
+        self.display().and_then(|ledger| ledger.last.cpu_watts)
+    }
+    fn source_note(&self) -> String {
+        match (self.shared_is_live(), self.shared_age_seconds) {
+            (true, Some(age)) => format!("{} · {age} 秒前", self.origin()),
+            (false, Some(age)) => format!(
+                "本会话 · 系统采样已停止 {age} 秒{}",
+                if age > energy::LEDGER_FRESH_SECONDS {
+                    "（仅显示本会话累计）"
+                } else {
+                    ""
+                }
+            ),
+            _ => self.origin().into(),
+        }
+    }
+}
+
 pub struct DesktopApp {
     pub controller: Controller,
     pub preferences: Preferences,
@@ -114,6 +288,7 @@ pub struct DesktopApp {
     motion_enabled: bool,
     source_details_expanded: bool,
     history: TemperatureHistory,
+    energy: EnergyMonitor,
     side_navigation: bool,
 }
 impl DesktopApp {
@@ -148,8 +323,19 @@ impl DesktopApp {
             motion_enabled: true,
             source_details_expanded: false,
             history: TemperatureHistory::default(),
+            energy: EnergyMonitor::default(),
             side_navigation: false,
         }
+    }
+    /// Disable the on-disk energy ledger for layout fixtures and tests.
+    #[doc(hidden)]
+    pub fn disable_energy_ledger(&mut self) {
+        self.energy.disabled = true;
+        self.energy.loaded = true;
+        self.energy.path = None;
+        self.energy.ledger = None;
+        self.energy.shared = None;
+        self.energy.shared_path = None;
     }
     pub fn scroll_to_bottom(&mut self) {
         self.bottom_requested = true;
@@ -287,6 +473,10 @@ impl DesktopApp {
         self.configure(root.ctx());
         self.tick(root.ctx());
         self.history.observe(
+            self.controller.snapshot.as_ref(),
+            self.controller.last_refresh,
+        );
+        self.energy.observe(
             self.controller.snapshot.as_ref(),
             self.controller.last_refresh,
         );
@@ -659,6 +849,8 @@ impl DesktopApp {
             ui.add_space(14.0);
             surface(ui, |ui| self.brightness_controls(ui));
         }
+        ui.add_space(18.0);
+        self.energy_panel(ui);
         ui.add_space(18.0);
         self.quick_controls(ui);
         ui.add_space(24.0);
@@ -1505,6 +1697,156 @@ impl DesktopApp {
         }
     }
 
+    fn energy_panel(&self, ui: &mut egui::Ui) {
+        let snapshot = self.controller.snapshot.as_ref();
+        let status = snapshot.map(|snapshot| &snapshot.energy);
+        surface(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
+            heading_with_icon(ui, "功耗与用电", Icon::Power);
+            ui.add_space(6.0);
+            let headline = status.and_then(mechrevo_console_core::EnergyStatus::headline_watts);
+            let scope = if status.and_then(|status| status.battery_watts).is_some() {
+                "电池放电 · 覆盖整机"
+            } else if status.and_then(|status| status.components_watts).is_some() {
+                "已测量部件 · 非整机功耗"
+            } else {
+                "当前没有可读功耗传感器"
+            };
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(watts_text(headline))
+                        .font(appearance::tabular_font(28.0))
+                        .strong(),
+                );
+                ui.label(RichText::new(scope).size(13.0).color(secondary(ui)));
+            });
+            if let Some(status) = status {
+                let metrics = [
+                    ("CPU 封装", watts_text(self.energy.last_cpu_watts())),
+                    ("部件", watts_text(status.components_watts)),
+                    ("电池放电", watts_text(status.battery_watts)),
+                ];
+                if ui.available_width() >= 360.0 {
+                    ui.columns(3, |columns| {
+                        for (column, (label, value)) in columns.iter_mut().zip(metrics) {
+                            energy_metric(column, label, &value);
+                        }
+                    });
+                } else {
+                    for (label, value) in metrics {
+                        energy_metric(ui, label, &value);
+                    }
+                }
+            } else {
+                ui.label(
+                    RichText::new("采集完成后显示可读的 CPU／GPU／电池功耗；缺失值保持未知。")
+                        .size(13.0)
+                        .color(secondary(ui)),
+                );
+            }
+            ui.add_space(6.0);
+            ui.separator();
+            let date = self.energy.today_date();
+            if let Some(day) = self.energy.today() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("今日用电").size(13.0).color(label_color(ui)));
+                    ui.label(
+                        RichText::new(if day.has_measurement() {
+                            total_energy_text(day.total_wh())
+                        } else {
+                            "—".into()
+                        })
+                        .font(appearance::tabular_font(22.0))
+                        .strong(),
+                    );
+                    ui.label(RichText::new(&date).size(12.0).color(secondary(ui)));
+                });
+                ui.label(
+                    RichText::new(self.energy.source_note())
+                        .size(12.0)
+                        .color(secondary(ui)),
+                );
+                let parts = [
+                    (
+                        "CPU 封装",
+                        if day.cpu_measured {
+                            wh_text(day.cpu_wh)
+                        } else {
+                            "—".into()
+                        },
+                    ),
+                    (
+                        "部件",
+                        if day.components_measured {
+                            wh_text(day.components_wh)
+                        } else {
+                            "—".into()
+                        },
+                    ),
+                    (
+                        "电池放电",
+                        if day.battery_measured {
+                            wh_text(day.battery_wh)
+                        } else {
+                            "—".into()
+                        },
+                    ),
+                ];
+                if ui.available_width() >= 360.0 {
+                    ui.columns(3, |columns| {
+                        for (column, (label, value)) in columns.iter_mut().zip(parts) {
+                            energy_metric(column, label, &value);
+                        }
+                    });
+                } else {
+                    for (label, value) in parts {
+                        energy_metric(ui, label, &value);
+                    }
+                }
+                ui.label(
+                    RichText::new(if day.has_measurement() {
+                        format!(
+                            "采样 {} 次 · 瞬时部件覆盖 {} 秒 · 计数器差值跨关闭/休眠仍有效",
+                            day.samples, day.measured_seconds
+                        )
+                    } else {
+                        format!(
+                            "已记录 {} 次采样基线；等待下一次采样形成能量区间",
+                            day.samples
+                        )
+                    })
+                    .size(12.0)
+                    .color(secondary(ui)),
+                );
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("今日用电").size(13.0).color(label_color(ui)));
+                    ui.label(RichText::new("—").font(appearance::tabular_font(22.0)));
+                    ui.label(RichText::new(&date).size(12.0).color(secondary(ui)));
+                });
+                ui.label(
+                    RichText::new("还没有今日样本；保持控制台运行或执行 mechrevo-console energy --sample 开始累计。")
+                        .size(12.0)
+                        .color(secondary(ui)),
+                );
+            }
+            if let Some(status) = status {
+                let cpu_from_ledger = self.energy.last_cpu_watts().is_some();
+                for note in status
+                    .notes
+                    .iter()
+                    .filter(|note| !(cpu_from_ledger && note.contains("energy_uj")))
+                    .take(3)
+                {
+                    ui.label(RichText::new(note).size(12.0).color(secondary(ui)));
+                }
+            }
+            if let Some(error) = &self.energy.error {
+                ui.label(RichText::new(error).size(12.0).color(error_color(ui)));
+            }
+        });
+    }
+
     fn power_source(&self, ui: &mut egui::Ui) {
         heading_with_icon(ui, "供电与电池", Icon::Battery);
         let readings = self
@@ -1725,6 +2067,7 @@ impl eframe::App for DesktopApp {
         self.render(ui);
     }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.energy.save_now();
         eframe::set_value(storage, "display_preferences", &self.preferences);
         eframe::set_value(storage, "interface_motion", &self.motion_enabled);
     }
@@ -2100,6 +2443,42 @@ fn fan_metric(ui: &mut egui::Ui, reading: &SensorReading) {
         ui.label(RichText::new(&reading.unit).size(13.0).color(secondary(ui)));
     });
 }
+fn watts_text(value: Option<f64>) -> String {
+    value
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| format!("{value:.1} W"))
+        .unwrap_or_else(|| "—".into())
+}
+
+fn total_energy_text(watt_hours: f64) -> String {
+    if !watt_hours.is_finite() || watt_hours < 0.0 {
+        "—".into()
+    } else if watt_hours >= 1000.0 {
+        format!("{:.3} kWh", watt_hours / 1000.0)
+    } else {
+        format!("{watt_hours:.1} Wh")
+    }
+}
+
+fn wh_text(watt_hours: f64) -> String {
+    if !watt_hours.is_finite() || watt_hours < 0.0 {
+        "—".into()
+    } else if watt_hours >= 1000.0 {
+        format!("{:.2} kWh", watt_hours / 1000.0)
+    } else {
+        format!("{watt_hours:.1} Wh")
+    }
+}
+
+fn energy_metric(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.label(RichText::new(label).size(12.0).color(secondary(ui)));
+    ui.label(
+        RichText::new(value)
+            .font(appearance::tabular_font(16.0))
+            .color(foreground(ui)),
+    );
+}
+
 #[derive(Clone, Copy)]
 enum Icon {
     Brand,
@@ -2197,6 +2576,21 @@ fn refresh_icon(p: &egui::Painter, rect: Rect, color: Color32, rotation: f32) {
 mod tests {
     use super::*;
     use mechrevo_console_core::{EvidenceSource, Identity, PowerPolicy, Snapshot};
+
+    #[test]
+    fn power_and_energy_text_keeps_unknown_separate_from_zero() {
+        assert_eq!(watts_text(None), "—");
+        assert_eq!(watts_text(Some(f64::NAN)), "—");
+        assert_eq!(watts_text(Some(0.0)), "0.0 W");
+        assert_eq!(watts_text(Some(42.54)), "42.5 W");
+        assert_eq!(total_energy_text(0.0), "0.0 Wh");
+        assert_eq!(total_energy_text(-1.0), "—");
+        assert_eq!(total_energy_text(12_500.0), "12.500 kWh");
+        assert_eq!(wh_text(0.0), "0.0 Wh");
+        assert_eq!(wh_text(999.94), "999.9 Wh");
+        assert_eq!(wh_text(1_500.0), "1.50 kWh");
+        assert_eq!(wh_text(f64::INFINITY), "—");
+    }
     fn reading(device: &str, value: Option<f64>) -> SensorReading {
         SensorReading {
             id: "temp1".into(),
@@ -2228,6 +2622,7 @@ mod tests {
             diagnostics: vec![],
             brightness: vec![],
             oem_controls: vec![],
+            energy: Default::default(),
         }
     }
     #[test]

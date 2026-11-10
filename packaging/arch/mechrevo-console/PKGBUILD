@@ -27,7 +27,7 @@ source=("mechrevo-drivers::git+${_source_url}#commit=${_source_commit}"
         'mechrevo-console.install')
 sha256sums=('SKIP'
             'bca48b9200f8aa66b34f357c3b8cce4f679bba998b6e777afec047bf601576a5'
-            '5aa6c999385663f2423934d8de3d52801a8468ca80403c2150b08ca29ad7c21f')
+            '3a80b8eeb26e0f58974f6b54d2a4591ad411bb48af3eb2bb200c16b6f1a91480')
 install=mechrevo-console.install
 
 prepare() {
@@ -43,6 +43,8 @@ prepare() {
         console/crates/cli/src/oem_helper.rs console/crates/core/src/privilege.rs \
         console/crates/gui/src/main.rs \
         console/resources/org.mechrevo.console.oem.policy \
+        console/resources/mechrevo-console-energy.service \
+        console/resources/mechrevo-console-energy.timer \
         scripts/mechrevo_control.py scripts/mechrevo-gaming-hotkey.service \
         scripts/mechrevo-ec-hotkey.service scripts/mechrevo-touchpad-sleep \
         console/crates/gui/assets/fonts/Cormorant-OFL.txt \
@@ -104,6 +106,10 @@ package() {
     fi
     install -Dm755 "$candidate" "$helper" || return 1
     install -Dm644 "$policy" "$installed_policy" || return 1
+    install -Dm644 console/resources/mechrevo-console-energy.service \
+        "${pkgdir}/usr/lib/systemd/system/mechrevo-console-energy.service" || return 1
+    install -Dm644 console/resources/mechrevo-console-energy.timer \
+        "${pkgdir}/usr/lib/systemd/system/mechrevo-console-energy.timer" || return 1
     if ! cmp -s "$candidate" "$helper" || ! cmp -s "$policy" "$installed_policy" ||
         [[ $(stat -c '%a' "$helper") != 755 || $(stat -c '%a' "$installed_policy") != 644 ]]; then
         printf '%s\n' 'Installed OEM helper or policy bytes/modes do not match the package contract.' >&2

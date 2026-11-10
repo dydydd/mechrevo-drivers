@@ -97,6 +97,16 @@ fn fixture(case: &str) -> DesktopApp {
             "reason":"没有已核验的型号专属接口；不会猜测 EC 寄存器或风扇参数。", "source":null, "options":[]
         }],
         "power_policy":{"scope":"操作系统 / 不修改 OEM 固件", "current":"balanced", "options":["balanced", "performance", "power-saver"], "source":null},
+        "energy":{
+            "sources":[{
+                "id":"fixture-gpu-power", "label":"fixture GPU: PPT", "kind":"hwmon_power", "watts":42.5,
+                "energy_uj":null, "max_energy_uj":null, "energy_wh":null, "device_id":"fixture-gpu",
+                "source":{"backend":"fixture-only", "path":"fixture://gpu/power1_input", "device_id":"fixture-gpu"},
+                "status":"available", "reason":null
+            }],
+            "external_power":true, "battery_status":null, "components_watts":42.5, "battery_watts":null,
+            "notes":["部件功耗是 hwmon 瞬时读数之和，不含屏幕、内存、硬盘与供电损耗。"]
+        },
         "diagnostics":[{"code":"fixture_only", "message":format!("诊断信息包含长路径：{long}，需要完整换行展示。")}]
     })).unwrap();
     if case == "no_telemetry" {
@@ -140,7 +150,9 @@ fn fixture(case: &str) -> DesktopApp {
         preferences.display_mode = DisplayMode::Compact;
         preferences.text_scale = 1.6;
     }
-    DesktopApp::with_controller(controller, preferences)
+    let mut app = DesktopApp::with_controller(controller, preferences);
+    app.disable_energy_ledger();
+    app
 }
 
 fn oem_fixture() -> DesktopApp {
@@ -1407,6 +1419,19 @@ fn unavailable_oem_controls_and_empty_inventory_cannot_offer_a_write() {
     assert!(app.controller.selected_oem_control.is_none());
     assert!(app.controller.oem_unavailable_reason().is_some());
     assert!(!app.controller.busy());
+}
+
+#[test]
+fn power_panel_shows_measured_watts_and_keeps_missing_energy_unknown() {
+    let fonts = Arc::new(SystemFontProvider::new().with_locale(Some("zh-Hans")));
+    let mut harness = Harness::new([1280, 1200], 1.0, fonts);
+    let mut app = fixture("representative");
+    let (_, output) = harness.frame(&mut app);
+    assert!(has_visible_text(&output, "功耗与用电"));
+    assert!(has_visible_text(&output, "42.5 W"));
+    assert!(has_visible_text(&output, "已测量部件 · 非整机功耗"));
+    assert!(has_visible_text(&output, "今日用电"));
+    assert!(has_visible_text(&output, "—"));
 }
 
 #[test]

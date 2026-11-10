@@ -1,6 +1,6 @@
 use mechrevo_console_core::{
-    registry, ControlError, OemControl, OemControlKind, OemDomain, OemValue, PowerProfile, Service,
-    Snapshot,
+    energy, registry, ControlError, EnergyLedger, OemControl, OemControlKind, OemDomain, OemValue,
+    PowerProfile, Service, Snapshot,
 };
 use serde_json::{json, Value};
 #[cfg(any(target_os = "linux", test))]
@@ -25,6 +25,7 @@ enum Action {
     Brightness(Option<u8>, Option<String>, bool),
     OemList,
     OemSet(String, String, bool),
+    Energy { sample: bool, json: bool },
     Export(PathBuf),
 }
 fn text(arg: &OsString) -> Result<&str, ControlError> {
@@ -45,6 +46,18 @@ fn parse(args: Vec<OsString>) -> Result<Action, ControlError> {
         "--version" | "-V" if rest.is_empty() => Ok(Action::Version),
         "status" if rest.is_empty() => Ok(Action::Status(false)),
         "status" if rest.len() == 1 && rest[0] == "--json" => Ok(Action::Status(true)),
+        "energy" => {
+            let mut sample = false;
+            let mut json = false;
+            for token in rest {
+                match text(token)? {
+                    "--sample" if !sample => sample = true,
+                    "--json" if !json => json = true,
+                    _ => return Err(usage("energy accepts only --sample and --json")),
+                }
+            }
+            Ok(Action::Energy { sample, json })
+        }
         "capabilities" if rest.is_empty() => Ok(Action::Capabilities),
         "models" if rest.len() <= 1 => Ok(Action::Models(
             rest.first().map(text).transpose()?.unwrap_or("").into(),
@@ -342,6 +355,135 @@ fn export(path: &std::path::Path, value: &Value) -> Result<(), ControlError> {
     file.sync_all()
         .map_err(|e| ControlError::new("export_failed", format!("{}: {e}", path.display())))
 }
+struct EnergyReport<'a> {
+    snapshot: &'a Snapshot,
+    date: &'a str,
+    ledger: Option<&'a EnergyLedger>,
+    path: Option<&'a std::path::Path>,
+    origin: &'a str,
+    fresh: bool,
+    age_seconds: Option<u64>,
+    sampled: bool,
+    notes: &'a [String],
+}
+
+impl EnergyReport<'_> {
+    fn document(&self) -> Value {
+        let today = self.ledger.and_then(|ledger| ledger.today(self.date));
+        json!({
+            "schema_version": 1,
+            "current": self.snapshot.energy,
+            "today": {
+                "date": self.date,
+                "day": today,
+                "has_measurement": today.is_some_and(|day| day.has_measurement()),
+                "machine_matches": self.ledger.is_none_or(|ledger| ledger.machine == energy::machine_key(&self.snapshot.identity)),
+            },
+            "ledger": {
+                "path": self.path,
+                "origin": self.origin,
+                "fresh": self.fresh,
+                "age_seconds": self.age_seconds,
+                "sampled": self.sampled,
+                "last_sample": self.ledger.and_then(|ledger| ledger.last.at_unix_ms),
+            },
+            "notes": self.notes,
+        })
+    }
+
+    fn human(&self) -> String {
+        use std::fmt::Write as _;
+        let mut output = String::new();
+        let current = &self.snapshot.energy;
+        if let Some(watts) = current.headline_watts() {
+            let scope = if current.battery_watts.is_some() {
+                "battery discharge, whole machine"
+            } else {
+                "measured components only"
+            };
+            let _ = writeln!(output, "Power: {watts:.3} W ({scope})");
+        } else {
+            let _ = writeln!(output, "Power: unknown");
+        }
+        for source in current
+            .sources
+            .iter()
+            .filter(|source| source.status == mechrevo_console_core::CapabilityStatus::Available)
+        {
+            let value = source
+                .watts
+                .map(|watts| format!("{watts:.3} W"))
+                .or_else(|| source.energy_uj.map(|energy| format!("{energy} uJ")))
+                .unwrap_or_else(|| "available".into());
+            let _ = writeln!(
+                output,
+                "  {}: {} [{}]",
+                source.label, value, source.source.path
+            );
+        }
+        match self.ledger.and_then(|ledger| ledger.today(self.date)) {
+            Some(day) if day.has_measurement() => {
+                let part = |measured: bool, value: f64| {
+                    if measured {
+                        format!("{value:.4}")
+                    } else {
+                        "n/a".into()
+                    }
+                };
+                let _ = writeln!(
+                    output,
+                    "Today {}: {:.4} Wh total (CPU {}, components {}, battery {}; samples={}, short coverage={} s)",
+                    self.date,
+                    day.total_wh(),
+                    part(day.cpu_measured, day.cpu_wh),
+                    part(day.components_measured, day.components_wh),
+                    part(day.battery_measured, day.battery_wh),
+                    day.samples,
+                    day.measured_seconds
+                );
+            }
+            Some(day) => {
+                let _ = writeln!(
+                    output,
+                    "Today {}: baseline recorded ({} samples); run again after an interval to measure energy",
+                    self.date, day.samples
+                );
+            }
+            None => {
+                let _ = writeln!(output, "Today {}: no recorded sample", self.date);
+            }
+        }
+        if let Some(path) = self.path {
+            let state = if self.fresh {
+                "live".to_string()
+            } else {
+                self.age_seconds
+                    .map(|seconds| format!("stale, {seconds}s old"))
+                    .unwrap_or_else(|| "stale".into())
+            };
+            let _ = writeln!(
+                output,
+                "Ledger: {} ({}, {state})",
+                path.display(),
+                self.origin
+            );
+        }
+        let cpu_from_ledger = self
+            .ledger
+            .and_then(|ledger| ledger.last.cpu_watts)
+            .is_some();
+        for note in current
+            .notes
+            .iter()
+            .filter(|note| !(cpu_from_ledger && note.contains("energy_uj")))
+            .chain(self.notes)
+        {
+            let _ = writeln!(output, "Note: {note}");
+        }
+        output
+    }
+}
+
 fn run(action: Action, service: &Service) -> Result<(), ControlError> {
     let mut stdout = io::stdout().lock();
     let output = match action {
@@ -424,6 +566,87 @@ fn run(action: Action, service: &Service) -> Result<(), ControlError> {
                 json!(service.apply_brightness(&plan)?)
             }
         }
+        Action::Energy { sample, json } => {
+            let snapshot = service.snapshot();
+            let now = SystemTime::now();
+            let date = energy::local_date(now);
+            let machine = energy::machine_key(&snapshot.identity);
+            let default_path = energy::default_ledger_path();
+            let mut notes = Vec::new();
+            let mut ledger = None;
+            let mut path = None;
+            let mut origin = "none";
+            let mut fresh = false;
+            let mut age_seconds = None;
+            let mut sampled = false;
+            if sample {
+                if let Some(target) = default_path.as_deref() {
+                    match energy::sample_ledger(target, &machine, &snapshot.energy, now) {
+                        Ok(value) => {
+                            ledger = Some(value);
+                            path = Some(target.to_path_buf());
+                            origin = if target == std::path::Path::new(energy::SHARED_LEDGER_PATH) {
+                                "system"
+                            } else {
+                                "user"
+                            };
+                            fresh = true;
+                            age_seconds = Some(0);
+                            sampled = true;
+                        }
+                        Err(error) => {
+                            notes.push(format!("{}: {}", error.code, error.message));
+                        }
+                    }
+                } else {
+                    notes.push("No writable state directory is available".into());
+                }
+                if !sampled {
+                    return Err(ControlError::new("energy_sample_failed", notes.join("; ")));
+                }
+            } else {
+                match energy::select_ledger(&machine, now) {
+                    Ok(Some(selection)) => {
+                        if !selection.fresh {
+                            notes.push(format!(
+                                "Ledger is {} seconds old; a live system sampler is not running",
+                                selection.age_seconds
+                            ));
+                        }
+                        ledger = Some(selection.ledger);
+                        path = Some(selection.path);
+                        origin = selection.origin;
+                        fresh = selection.fresh;
+                        age_seconds = Some(selection.age_seconds);
+                    }
+                    Ok(None) => {
+                        notes.push(
+                            "No readable ledger for this machine; run 'mechrevo-console energy --sample'"
+                                .into(),
+                        );
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            let report = EnergyReport {
+                snapshot: &snapshot,
+                date: &date,
+                ledger: ledger.as_ref(),
+                path: path.as_deref(),
+                origin,
+                fresh,
+                age_seconds,
+                sampled,
+                notes: &notes,
+            };
+            if json {
+                report.document()
+            } else {
+                write!(stdout, "{}", report.human())
+                    .map_err(|error| ControlError::new("output_failed", error.to_string()))?;
+                return Ok(());
+            }
+        }
         Action::Export(path) => {
             let value = status_json(service)?;
             export(&path, &value)?;
@@ -449,6 +672,94 @@ mod tests {
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
     }
+    #[test]
+    fn energy_options_are_explicit() {
+        assert_eq!(
+            parse(args(&["energy"])).unwrap(),
+            Action::Energy {
+                sample: false,
+                json: false
+            }
+        );
+        assert_eq!(
+            parse(args(&["energy", "--sample", "--json"])).unwrap(),
+            Action::Energy {
+                sample: true,
+                json: true
+            }
+        );
+        for values in [
+            vec!["energy", "--sample", "--sample"],
+            vec!["energy", "--write"],
+            vec!["energy", "--json", "--json"],
+        ] {
+            assert!(parse(args(&values)).is_err(), "{values:?} was accepted");
+        }
+    }
+
+    #[test]
+    fn energy_report_keeps_missing_values_unknown_and_daily_scope_separate() {
+        let snapshot = fixture_snapshot();
+        let report = EnergyReport {
+            snapshot: &snapshot,
+            date: "2026-11-10",
+            ledger: None,
+            path: None,
+            origin: "none",
+            fresh: false,
+            age_seconds: None,
+            sampled: false,
+            notes: &[],
+        };
+        let document = report.document();
+        assert_eq!(document["schema_version"], 1);
+        assert_eq!(document["current"]["components_watts"], Value::Null);
+        assert_eq!(document["today"]["day"], Value::Null);
+        assert_eq!(document["today"]["has_measurement"], false);
+        assert_eq!(document["today"]["machine_matches"], true);
+        assert!(document["ledger"]["path"].is_null());
+        let human = report.human();
+        assert!(human.contains("Power: unknown"));
+        assert!(human.contains("no recorded sample"));
+
+        let mut ledger = EnergyLedger::new(&energy::machine_key(&snapshot.identity));
+        ledger.days.insert(
+            "2026-11-10".into(),
+            mechrevo_console_core::EnergyDay {
+                cpu_wh: 1.5,
+                components_wh: 2.5,
+                battery_wh: 3.0,
+                samples: 4,
+                measured_seconds: 12,
+                cpu_measured: true,
+                components_measured: true,
+                battery_measured: true,
+            },
+        );
+        let notes = vec!["note".to_string()];
+        let report = EnergyReport {
+            snapshot: &snapshot,
+            date: "2026-11-10",
+            ledger: Some(&ledger),
+            path: Some(std::path::Path::new("/tmp/energy.json")),
+            origin: "system",
+            fresh: true,
+            age_seconds: Some(0),
+            sampled: true,
+            notes: &notes,
+        };
+        let document = report.document();
+        assert_eq!(document["today"]["day"]["cpu_wh"], 1.5);
+        assert_eq!(document["today"]["day"]["battery_wh"], 3.0);
+        assert_eq!(document["today"]["has_measurement"], true);
+        assert_eq!(document["ledger"]["sampled"], true);
+        assert_eq!(document["notes"][0], "note");
+        let human = report.human();
+        assert!(human.contains("7.0000 Wh total"));
+        assert!(human.contains("CPU 1.5000"));
+        assert!(human.contains("note"));
+    }
+
     #[test]
     fn oem_commands_require_explicit_control_value_and_known_options() {
         assert_eq!(parse(args(&["oem", "list"])).unwrap(), Action::OemList);
@@ -775,6 +1086,7 @@ mod tests {
             power_policy: Default::default(),
             diagnostics: Vec::new(),
             oem_controls: Vec::new(),
+            energy: Default::default(),
             brightness: vec![BrightnessDevice {
                 id: "fixture-screen".into(),
                 label: "屏幕".into(),

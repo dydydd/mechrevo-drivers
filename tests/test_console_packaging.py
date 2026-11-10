@@ -22,6 +22,8 @@ REQUIRED_SOURCE = (
     "console/crates/core/src/privilege.rs",
     "console/crates/gui/src/main.rs",
     "console/resources/org.mechrevo.console.oem.policy",
+    "console/resources/mechrevo-console-energy.service",
+    "console/resources/mechrevo-console-energy.timer",
     "scripts/mechrevo_control.py",
     "scripts/mechrevo-gaming-hotkey.service",
     "scripts/mechrevo-ec-hotkey.service",

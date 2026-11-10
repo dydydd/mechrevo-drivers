@@ -115,6 +115,7 @@ fn close_waits_without_freezing_for_success_and_completed_rollback() {
             },
         });
         let mut app = DesktopApp::with_controller(controller, Preferences::default());
+        app.disable_energy_ledger();
         let ctx = Context::default();
         ctx.add_font_provider(Arc::new(
             SystemFontProvider::new().with_locale(Some("zh-Hans")),

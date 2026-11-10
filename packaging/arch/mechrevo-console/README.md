@@ -62,6 +62,11 @@ systemctl enable --now mechrevo-ec-hotkey.service
 可选安装 `noto-fonts-cjk`。运行依赖明确包含 `python`、`systemd` 与 `polkit`。
 桌面会话需有可用的授权代理才能显示管理员认证；本包不自动启用常驻服务或授权代理，
 也不自动安装或升级 DKMS/TCC；已有 profile 的迁移规则见开头说明。
+本包另安装可选的 `mechrevo-console-energy.service`／`.timer`：只读采样 RAPL、hwmon
+和电池能量，每 20 秒写一次 `/var/lib/mechrevo-console/energy.json`，不修改功耗限制、
+风扇或 EC。默认不启用；需要 CPU 封装用电统计时执行
+`systemctl enable --now mechrevo-console-energy.timer`。采样口径和未验证项见
+[控制台说明](../../../docs/MECHREVO-CONSOLE.md#功耗与今日用电2026-11-10)。
 五档控制仍需受支持机型及可信、有效的 tccd 配置。
 
 在此目录执行；将本地仓库路径设为实际位置，Git 只取固定提交，工作区改动不进入包：
