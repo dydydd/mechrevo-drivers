@@ -31,9 +31,12 @@ systemctl enable --now mechrevo-ec-hotkey.service
 本机 Turbo 小灯变化已有用户确认，其余灯态及唤醒后的行为见
 [灯光验证记录](../../../docs/PERFORMANCE-INDICATOR.md)。
 
-当前配方固定源码提交 `c152ca3fe2599aababcaf83f454987285ebf1abd`，包版本为
-`0.1.0.r1535.gc152ca3-1`。该提交在 r1535 基线上增加无 tccd 的 EC-only 热键服务、Windows 54919 TDP profile、UEFI PowerMode 同步与触控板恢复 hook；
-发布收据仍对应旧的 r1535-2 包，不表示新包已经发布或完成整包验收。
+当前配方固定源码提交 `eceecb02c94f082e6acc01f8783b12f2821828e0`，包版本为
+`0.1.0.r1535.geceecb0-1`。该提交在 r1535 基线上增加只读功耗与今日用电面板、
+`mechrevo-console energy`、可选的 energy 采样 timer，并记录 GM6BG0Q 的
+`N.1.19MRO15` 局部证据；旧的无 tccd EC-only 热键、Windows 54919 TDP profile、
+UEFI PowerMode 同步与触控板恢复 hook 保持不变。发布收据仍对应旧的 r1535-2 包，
+不表示新包已经发布或完成整包验收。
 该配方已发布到独立的 [AUR 包](https://aur.archlinux.org/packages/mechrevo-console)，
 签名安装包与配方源包见 [GitHub Release](https://github.com/LIghtJUNction/mechrevo-drivers/releases/tag/console-v0.1.0-r1535-2)。
 发布构建、制品摘要、远端状态与验收边界见 [发布收据](../../../docs/verification/console-release-r1535-2.json)；
