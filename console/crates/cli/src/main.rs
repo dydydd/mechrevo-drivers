@@ -13,7 +13,7 @@ use std::{
     str::FromStr,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-const HELP:&str="mechrevo-console 0.1.0 — Windows/Linux OS controls and evidence\n\nUsage:\n  mechrevo-console status [--json]\n  mechrevo-console capabilities\n  mechrevo-console models [query]\n  mechrevo-console profile <balanced|performance|power-saver> [--dry-run]\n  mechrevo-console brightness [percent] [--device ID] [--dry-run]\n  mechrevo-console oem list\n  mechrevo-console oem set ID VALUE [--dry-run]\n  mechrevo-console export --output PATH\n  mechrevo-console --help\n\nPower profiles use Linux ACPI platform_profile or installed Windows OS power\nschemes. They are separate from OEM presets and never tune GPU/MUX/EC registers.\nBrightness requires an enumerated OS device; multiple devices require --device.\nOEM controls use only enumerated, qualified driver interfaces. Use oem list\nfor exact IDs, choices, brightness levels and readback limits. Boolean values\nare on/off; colors use '#RRGGBB'. OEM --dry-run never writes or elevates.\nAn OEM write may request authentication through the installed limited helper.\nExport writes UTF-8 JSON, requires an explicit path and refuses overwrites.\nMissing telemetry is unknown, never a simulated zero. No automatic sudo.\n";
+const HELP:&str="mechrevo-console 0.1.0 — Windows/Linux OS controls and evidence\n\nUsage:\n  mechrevo-console status [--json]\n  mechrevo-console capabilities\n  mechrevo-console models [query]\n  mechrevo-console profile <balanced|performance|power-saver> [--dry-run]\n  mechrevo-console brightness [percent] [--device ID] [--dry-run]\n  mechrevo-console oem list\n  mechrevo-console oem set ID VALUE [--dry-run]\n  mechrevo-console energy [--sample] [--json]\n  mechrevo-console export --output PATH\n  mechrevo-console --help\n\nPower profiles use Linux ACPI platform_profile or installed Windows OS power\nschemes. They are separate from OEM presets and never tune GPU/MUX/EC registers.\nBrightness requires an enumerated OS device; multiple devices require --device.\nOEM controls use only enumerated, qualified driver interfaces. Use oem list\nfor exact IDs, choices, brightness levels and readback limits. Boolean values\nare on/off; colors use '#RRGGBB'. OEM --dry-run never writes or elevates.\nAn OEM write may request authentication through the installed limited helper.\nEnergy reads exposed hwmon/RAPL/battery interfaces and a local daily ledger;\n--sample records one observation. No whole-machine sensor is invented.\nExport writes UTF-8 JSON, requires an explicit path and refuses overwrites.\nMissing telemetry is unknown, never a simulated zero. No automatic sudo.\n";
 #[derive(Debug, PartialEq)]
 enum Action {
     Help,
@@ -509,6 +509,17 @@ fn run(action: Action, service: &Service) -> Result<(), ControlError> {
                 )
                 .map_err(|e| ControlError::new("output_failed", e.to_string()))?;
             }
+            match s.energy.headline_watts() {
+                Some(watts) if s.energy.battery_watts.is_some() => writeln!(
+                    stdout,
+                    "Power: {watts:.3} W (battery discharge, whole machine)"
+                )
+                .map_err(|e| ControlError::new("output_failed", e.to_string()))?,
+                Some(watts) => writeln!(stdout, "Power: {watts:.3} W (measured components only)")
+                    .map_err(|e| ControlError::new("output_failed", e.to_string()))?,
+                None => writeln!(stdout, "Power: unknown")
+                    .map_err(|e| ControlError::new("output_failed", e.to_string()))?,
+            }
             for control in s.oem_controls {
                 let current = control
                     .current
@@ -672,6 +683,12 @@ mod tests {
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
     }
+    #[test]
+    fn help_documents_energy_and_sampling() {
+        assert!(HELP.contains("mechrevo-console energy [--sample] [--json]"));
+        assert!(HELP.contains("No whole-machine sensor is invented"));
+    }
+
     #[test]
     fn energy_options_are_explicit() {
         assert_eq!(
